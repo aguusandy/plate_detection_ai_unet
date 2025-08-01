@@ -1,5 +1,6 @@
-# plate_recognition.py
-# UNET-based License Plate Recognition System
+# Plate Recognition in Images using Unet as Neural Network model
+# This script is intended to be run and trained on a Linux system with an AMD GPU using ROCm.
+# Make sure your environment is properly configured for ROCm and PyTorch GPU support.
 
 import torch
 import numpy as np
@@ -11,320 +12,260 @@ from torchvision import transforms as T
 from torch import nn
 from torch.nn import functional as F
 from torchvision.ops import sigmoid_focal_loss
-import cv2
 
-# IMPORTS
-print("Loading libraries...")
+# Choose the device, will use GPU if available (AMD ROCm compatible)
+my_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(my_device)
+# print(torch.cuda.get_device_name(0))
 
-# Device configuration
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+# FILE PATHS
+# Use relative paths for Linux compatibility
+PATH_DATA = 'dataset/images/'
+PATH_MASK = 'dataset/masks/'
 
-# Custom Dataset Class
+# DATASET
 class Plates_Dataset(Dataset):
-    """
-    Custom dataset class for loading plate images and their corresponding masks
-    """
-    def __init__(self, data_path, mask_path, transform=None):
+    def __init__(self, data_path, mask_path, transform_data, transform_mask):
         self.data_path = data_path
         self.mask_path = mask_path
-        self.transform = transform
-        
-        # Get all image files
-        self.images = [f for f in os.listdir(data_path) if f.endswith('.jpg')]
-        self.images.sort()
-        
+        self.transform_data = transform_data
+        self.transform_mask = transform_mask
+        self.images = sorted(os.listdir(self.data_path))
+        self.masks = sorted(os.listdir(self.mask_path))
     def __len__(self):
-        return len(self.images)
-    
+        return len(self.masks)
     def __getitem__(self, idx):
-        # Load image
-        img_name = self.images[idx]
-        img_path = os.path.join(self.data_path, img_name)
-        mask_path = os.path.join(self.mask_path, img_name)
-        
-        # Load image and mask
-        image = Image.open(img_path).convert('RGB')
-        mask = Image.open(mask_path).convert('L')  # Grayscale
-        
-        # Apply transforms
-        if self.transform:
-            image = self.transform(image)
-            mask = self.transform(mask)
-        
+        img_path = os.path.join(self.data_path, self.images[idx])
+        image = Image.open(img_path)
+        mask_path = os.path.join(self.mask_path, self.masks[idx])
+        mask = Image.open(mask_path)
+        if self.transform_data is not None:
+            image = self.transform_data(image)
+        if self.transform_mask is not None:
+            mask = self.transform_mask(mask)
+        mask = (torch.sum(mask, dim=0) / 3).unsqueeze(0)
+        # image is returned in 3 channels (rgb), mask in 1 channel (grayscale)
         return image, mask
 
-# UNET Model Architecture
-class UNET(nn.Module):
-    """
-    UNET architecture for semantic segmentation
-    """
-    def __init__(self, channels_in=3, channels=32, num_classes=1):
-        super(UNET, self).__init__()
-        
-        # Encoder (downsampling path)
-        self.enc1 = self._make_layer(channels_in, channels, 2)
-        self.enc2 = self._make_layer(channels, channels*2, 2)
-        self.enc3 = self._make_layer(channels*2, channels*4, 2)
-        self.enc4 = self._make_layer(channels*4, channels*8, 2)
-        
-        # Bottleneck
-        self.bottleneck = self._make_layer(channels*8, channels*16, 2)
-        
-        # Decoder (upsampling path)
-        self.up4 = nn.ConvTranspose2d(channels*16, channels*8, kernel_size=2, stride=2)
-        self.dec4 = self._make_layer(channels*16, channels*8, 1)
-        
-        self.up3 = nn.ConvTranspose2d(channels*8, channels*4, kernel_size=2, stride=2)
-        self.dec3 = self._make_layer(channels*8, channels*4, 1)
-        
-        self.up2 = nn.ConvTranspose2d(channels*4, channels*2, kernel_size=2, stride=2)
-        self.dec2 = self._make_layer(channels*4, channels*2, 1)
-        
-        self.up1 = nn.ConvTranspose2d(channels*2, channels, kernel_size=2, stride=2)
-        self.dec1 = self._make_layer(channels*2, channels, 1)
-        
-        # Final output layer
-        self.final = nn.Conv2d(channels, num_classes, kernel_size=1)
-        
-    def _make_layer(self, in_channels, out_channels, num_blocks):
-        """Helper function to create a layer with multiple blocks"""
-        layers = []
-        for _ in range(num_blocks):
-            layers.extend([
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True)
-            ])
-            in_channels = out_channels
-        return nn.Sequential(*layers)
-    
-    def forward(self, x):
-        # Encoder
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(F.max_pool2d(enc1, 2))
-        enc3 = self.enc3(F.max_pool2d(enc2, 2))
-        enc4 = self.enc4(F.max_pool2d(enc3, 2))
-        
-        # Bottleneck
-        bottleneck = self.bottleneck(F.max_pool2d(enc4, 2))
-        
-        # Decoder with skip connections
-        dec4 = self.up4(bottleneck)
-        dec4 = torch.cat([dec4, enc4], dim=1)
-        dec4 = self.dec4(dec4)
-        
-        dec3 = self.up3(dec4)
-        dec3 = torch.cat([dec3, enc3], dim=1)
-        dec3 = self.dec3(dec3)
-        
-        dec2 = self.up2(dec3)
-        dec2 = torch.cat([dec2, enc2], dim=1)
-        dec2 = self.dec2(dec2)
-        
-        dec1 = self.up1(dec2)
-        dec1 = torch.cat([dec1, enc1], dim=1)
-        dec1 = self.dec1(dec1)
-        
-        # Final output
-        output = self.final(dec1)
-        return torch.sigmoid(output)
+# transforms
+transform = T.Compose([T.Resize([224, 224]), T.ToTensor()])
 
-# Training Function
-def train(model, train_data, validate_data, optimizer, epochs=100, step_store=10, patience=10, tol_error=1e-2):
-    """
-    Training function with early stopping
-    """
+# call of the dataset class
+full_dataset = Plates_Dataset(PATH_DATA, PATH_MASK, transform, transform)
+
+# CONSTANTS
+DATASET_SIZE = len(full_dataset)
+BATCH_SIZE = 32
+TRAIN_SIZE = int(0.80 * DATASET_SIZE)
+TEST_SIZE = DATASET_SIZE - TRAIN_SIZE
+VALID_SIZE = int(0.1 * TRAIN_SIZE)
+
+# split the complete train_dataset in two tensors:
+t_dataset, test_dataset = random_split(full_dataset, [TRAIN_SIZE, TEST_SIZE])
+train_dataset, valid_dataset = random_split(t_dataset, [TRAIN_SIZE - VALID_SIZE, VALID_SIZE])
+
+print('Length of train dataset: ', len(train_dataset))
+print('Length of validation dataset: ', len(valid_dataset))
+print('Length of test dataset: ', len(test_dataset))
+print('Total of files in the dataset: ', len(full_dataset))
+
+# DATALOADER
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+validate_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+# PLOT THE BATCH
+def plot_batch(batch_size, imgs, masks):
+    plt.figure(figsize=(20, 10))
+    for i in range(batch_size):
+        plt.subplot(4, 8, i + 1)
+        img = imgs[i, ...].permute(1, 2, 0).numpy()
+        mask = masks[i, ...].permute(1, 2, 0).numpy()
+        plt.imshow(img)
+        plt.imshow(mask, cmap='gray', alpha=0.75)
+        plt.axis('Off')
+    plt.tight_layout()
+    plt.show()
+
+# plot some examples
+imgs, masks = next(iter(train_loader))
+print(imgs.shape, masks.shape)
+plot_batch(BATCH_SIZE, imgs, masks)
+
+class Conv_3_k(nn.Module):
+    def __init__(self, channels_in, channels_out):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels_in, channels_out, kernel_size=3, stride=1, padding=1)
+    def forward(self, x):
+        return self.conv1(x)
+
+class Double_Conv(nn.Module):
+    def __init__(self, channels_in, channels_out):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            Conv_3_k(channels_in, channels_out),
+            nn.BatchNorm2d(channels_out),
+            nn.ReLU(),
+            Conv_3_k(channels_out, channels_out),
+            nn.BatchNorm2d(channels_out),
+            nn.ReLU(),
+        )
+    def forward(self, x):
+        return self.double_conv(x)
+
+class Down_Conv(nn.Module):
+    def __init__(self, channels_in, channels_out):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.MaxPool2d(2, 2),
+            Double_Conv(channels_in, channels_out)
+        )
+    def forward(self, x):
+        return self.encoder(x)
+
+class Up_Conv(nn.Module):
+    def __init__(self, channels_in, channels_out):
+        super().__init__()
+        self.upsample_layer = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bicubic'),
+            nn.Conv2d(channels_in, channels_in // 2, kernel_size=1, stride=1)
+        )
+        self.decoder = Double_Conv(channels_in, channels_out)
+    def forward(self, x1, x2):
+        x1 = self.upsample_layer(x1)
+        x = torch.cat([x2, x1], dim=1)
+        return self.decoder(x)
+
+# UNET implementation
+class UNET(nn.Module):
+    def __init__(self, channels_in, channels, num_classes):
+        super().__init__()
+        self.first_conv = Double_Conv(channels_in, channels)
+        self.down_conv1 = Down_Conv(channels, 2 * channels)
+        self.down_conv2 = Down_Conv(2 * channels, 4 * channels)
+        self.down_conv3 = Down_Conv(4 * channels, 8 * channels)
+        self.middle_conv = Down_Conv(8 * channels, 16 * channels)
+        self.up_conv1 = Up_Conv(16 * channels, 8 * channels)
+        self.up_conv2 = Up_Conv(8 * channels, 4 * channels)
+        self.up_conv3 = Up_Conv(4 * channels, 2 * channels)
+        self.up_conv4 = Up_Conv(2 * channels, channels)
+        self.last_conv = nn.Conv2d(channels, num_classes, kernel_size=1, stride=1)
+        self.sigmoid = nn.Sigmoid()
+    def forward(self, x):
+        x1 = self.first_conv(x)
+        x2 = self.down_conv1(x1)
+        x3 = self.down_conv2(x2)
+        x4 = self.down_conv3(x3)
+        x5 = self.middle_conv(x4)
+        u1 = self.up_conv1(x5, x4)
+        u2 = self.up_conv2(u1, x3)
+        u3 = self.up_conv3(u2, x2)
+        u4 = self.up_conv4(u3, x1)
+        return self.sigmoid(self.last_conv(u4))
+
+# Metrics function
+def metrics(model, data):
+    intersection = 0
+    denom = 0
+    union = 0
+    loss_acum = 0
+    model.to(device=my_device)
+    with torch.no_grad():
+        for x, y in data:
+            x = x.to(device=my_device, dtype=torch.float32)
+            y = y.to(device=my_device, dtype=torch.float32).squeeze(1)
+            y_pred = model(x).squeeze(1)
+            loss = F.binary_cross_entropy(y_pred, y).to(device=my_device)
+            loss_acum += loss.item()
+            intersection += (y_pred * y).sum()
+            denom += (y_pred + y).sum()
+            union += (y_pred + y - y_pred * y).sum()
+        dice = 2 * intersection / (denom + 1e-8)
+        iou = (intersection) / (union + 1e-5)
+    return dice, iou, loss_acum
+
+# Train function
+def train(model, train_data, validate_data, optimizer, epochs=100, step_store=10, pacient=10, tol_error=1e-2):
+    acum_v = []
+    model = model.to(device=my_device)
+    iou_v = []
+    dice_v = []
     model.train()
-    train_losses = []
-    val_losses = []
-    best_val_loss = float('inf')
-    patience_counter = 0
-    
     for epoch in range(epochs):
-        # Training phase
-        model.train()
-        train_loss = 0
-        for batch_idx, (data, target) in enumerate(train_data):
-            data, target = data.to(device), target.to(device)
-            
+        acum = 0
+        pacient_step = 0
+        for batch, (x, y) in enumerate(train_data, start=1):
+            x = x.to(device=my_device, dtype=torch.float32)
+            y = y.to(device=my_device, dtype=torch.float32)
+            y_pred = model(x)
             optimizer.zero_grad()
-            output = model(data)
-            
-            # Calculate loss (using focal loss for better training)
-            loss = sigmoid_focal_loss(output, target, alpha=0.25, gamma=2.0, reduction='mean')
-            
+            loss = F.binary_cross_entropy(y_pred, y).to(device=my_device)
+            acum += loss.item()
             loss.backward()
             optimizer.step()
-            
-            train_loss += loss.item()
-        
-        # Validation phase
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for data, target in validate_data:
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                loss = sigmoid_focal_loss(output, target, alpha=0.25, gamma=2.0, reduction='mean')
-                val_loss += loss.item()
-        
-        # Calculate average losses
-        avg_train_loss = train_loss / len(train_data)
-        avg_val_loss = val_loss / len(validate_data)
-        
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        
-        # Print progress
-        if epoch % step_store == 0:
-            print(f'Epoch {epoch}: Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
-        
-        # Early stopping
-        if avg_val_loss < best_val_loss - tol_error:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            # Save best model
-            torch.save(model.state_dict(), 'best_model.pth')
-        else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f'Early stopping at epoch {epoch}')
-            break
-    
-    return train_losses, val_losses
-
-# Prediction Function
-def predict_plate(model, image_path, threshold=0.5):
-    """
-    Predict plate location in a given image
-    """
-    model.eval()
-    
-    # Load and preprocess image
-    transform = T.Compose([
-        T.Resize((256, 256)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    image = Image.open(image_path).convert('RGB')
-    image_tensor = transform(image).unsqueeze(0).to(device)
-    
-    # Predict
-    with torch.no_grad():
-        output = model(image_tensor)
-        prediction = (output > threshold).float()
-    
-    return prediction.squeeze().cpu().numpy()
-
-# Visualization Function
-def visualize_prediction(image_path, prediction, save_path=None):
-    """
-    Visualize the prediction overlay on the original image
-    """
-    # Load original image
-    image = cv2.imread(image_path)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    # Resize prediction to match image size
-    prediction_resized = cv2.resize(prediction, (image.shape[1], image.shape[0]))
-    
-    # Create overlay
-    overlay = image.copy()
-    overlay[prediction_resized > 0.5] = [255, 0, 0]  # Red overlay for detected plate
-    
-    # Blend images
-    alpha = 0.7
-    result = cv2.addWeighted(image, alpha, overlay, 1-alpha, 0)
-    
-    # Plot
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(1, 3, 1)
-    plt.imshow(image)
-    plt.title('Original Image')
-    plt.axis('off')
-    
-    plt.subplot(1, 3, 2)
-    plt.imshow(prediction_resized, cmap='gray')
-    plt.title('Prediction Mask')
-    plt.axis('off')
-    
-    plt.subplot(1, 3, 3)
-    plt.imshow(result)
-    plt.title('Overlay')
-    plt.axis('off')
-    
-    if save_path:
-        plt.savefig(save_path, bbox_inches='tight', dpi=300)
-    
+            if batch % step_store == 0:
+                dice, iou, loss_val = metrics(model, validate_data)
+                iou_v.append(iou)
+                dice_v.append(dice)
+                print(f' dice: {dice}, iou: {iou}')
+                if loss_val < tol_error:
+                    if pacient_step < pacient:
+                        pacient_step += 1
+                    else:
+                        break
+        print('epoch ', epoch, ' acumulated: ', acum)
+        acum_v.append(acum)
+    plt.plot(acum_v)
     plt.show()
+    return iou_v, dice_v
 
-# Main execution function
-def main():
-    """
-    Main function to run the complete pipeline
-    """
-    # Configuration
-    data_path = "dataset/images"
-    mask_path = "dataset/masks"
-    batch_size = 8
-    learning_rate = 0.001
-    epochs = 100
-    
-    # Data transforms
-    transform = T.Compose([
-        T.Resize((256, 256)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    # Create dataset
-    print("Loading dataset...")
-    dataset = Plates_Dataset(data_path, mask_path, transform=transform)
-    
-    # Split dataset
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    
-    # Initialize model
-    print("Initializing model...")
-    model = UNET(channels_in=3, channels=32, num_classes=1).to(device)
-    
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    
-    # Train model
-    print("Starting training...")
-    train_losses, val_losses = train(model, train_loader, val_loader, optimizer, epochs=epochs)
-    
-    # Plot training curves
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.show()
-    
-    # Load best model for prediction
-    model.load_state_dict(torch.load('best_model.pth'))
-    
-    # Example prediction
-    if os.path.exists('imgs/test_img.png'):
-        print("Making prediction on test image...")
-        prediction = predict_plate(model, 'imgs/test_img.png')
-        visualize_prediction('imgs/test_img.png', prediction, 'prediction_result.png')
-    
-    print("Training completed!")
+# Define the model and optimizer
+model = UNET(channels_in=3, channels=32, num_classes=1)
+epochs = 20
+optimizer_unet = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.95)
 
-if __name__ == "__main__":
-    main()
+# Train the model
+iou_v, dice_v = train(model, train_loader, validate_loader, optimizer_unet, epochs)
+
+torch.save(model, 'model8c_5e_ce.pt')
+torch.save(model.state_dict(), 'model16c_50e_bcelog_state_dict.pt')
+
+# Plot metrics
+x = BATCH_SIZE * np.arange(0, len(iou_v))
+plt.plot(x, torch.Tensor(iou_v), label='IOU')
+plt.plot(x, torch.Tensor(dice_v), label='DICE')
+plt.xlabel('')
+plt.ylabel('')
+plt.title('Metrics for training: IOU, DICE')
+plt.legend(loc="upper left")
+plt.show()
+
+# TEST
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+# Plot predictions
+imgs_test, masks_test = next(iter(test_loader))
+model = model.to(device=my_device)
+imgs_test = imgs_test.cuda()
+with torch.no_grad():
+    scores = model(imgs_test)
+    preds = scores[:, 0]
+imgs_test = imgs_test.cpu()
+preds = preds.cpu()
+print(preds.shape)
+plot_batch(BATCH_SIZE, imgs_test, preds.unsqueeze(1))
+
+def test(model, data):
+    dice, iou = metrics(model, data)
+    return dice, iou
+
+iou_v_test, dice_v_test = test(model, test_loader)
+
+# Plot test metrics
+x = BATCH_SIZE * np.arange(0, len(iou_v))
+plt.plot(x, torch.Tensor(iou_v), label='IOU')
+plt.plot(x, torch.Tensor(dice_v), label='DICE')
+plt.xlabel('')
+plt.ylabel('')
+plt.title('Metrics for TEST: IOU, DICE')
+plt.legend(loc="upper left")
+plt.show()
