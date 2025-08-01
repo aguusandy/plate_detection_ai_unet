@@ -14,9 +14,31 @@ from torch.nn import functional as F
 from torchvision.ops import sigmoid_focal_loss
 
 # Choose the device, will use GPU if available (AMD ROCm compatible)
+print("PyTorch version:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA version:", torch.version.cuda if torch.cuda.is_available() else "No CUDA")
+print("Number of GPUs:", torch.cuda.device_count())
+
+if torch.cuda.is_available():
+    print("GPU detected:")
+    for i in range(torch.cuda.device_count()):
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"  Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+else:
+    print("No GPU detected. Possible issues:")
+    print("1. ROCm PyTorch not properly installed")
+    print("2. Environment variables not set correctly")
+    print("3. GPU not supported by current ROCm version")
+
 my_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(my_device)
-# print(torch.cuda.get_device_name(0))
+print(f"Using device: {my_device}")
+
+# Force GPU usage if available (comment this line if you want to test on CPU)
+if torch.cuda.is_available():
+    torch.cuda.set_device(0)  # Use first GPU
+    print(f"Current GPU: {torch.cuda.current_device()}")
+else:
+    print("WARNING: Running on CPU - training will be very slow!")
 
 # FILE PATHS
 # Use relative paths for Linux compatibility
@@ -214,8 +236,8 @@ def train(model, train_data, validate_data, optimizer, epochs=100, step_store=10
                         break
         print('epoch ', epoch, ' acumulated: ', acum)
         acum_v.append(acum)
-    plt.plot(acum_v)
-    plt.show()
+    # plt.plot(acum_v)
+    # plt.show()
     return iou_v, dice_v
 
 # Define the model and optimizer
