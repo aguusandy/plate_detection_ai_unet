@@ -111,7 +111,7 @@ def plot_batch(batch_size, imgs, masks):
 # plot some examples
 imgs, masks = next(iter(train_loader))
 print(imgs.shape, masks.shape)
-plot_batch(BATCH_SIZE, imgs, masks)
+# plot_batch(BATCH_SIZE, imgs, masks)
 
 class Conv_3_k(nn.Module):
     def __init__(self, channels_in, channels_out):
