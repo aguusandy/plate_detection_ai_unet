@@ -26,3 +26,7 @@ The objective of the software is process images and retrieve a **binary mask** t
 <p align="center">
   <img src="https://github.com/aguusandy/plate_detection_ai_unet/blob/master/imgs/test_img.png" alt="Mask detected" width="600"/>
 </p>
+
+<p align="center">
+  <img src="https://github.com/aguusandy/plate_detection_ai_unet/blob/master/imgs/result.png" alt="Result" width="600"/>
+</p>
